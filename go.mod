@@ -1,5 +1,5 @@
 module github.com/mingmxren/protokit
 
-go 1.17
+go 1.15
 
-require google.golang.org/protobuf v1.27.1
+require google.golang.org/protobuf v1.28.0
