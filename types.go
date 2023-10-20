@@ -2,11 +2,13 @@ package protokit
 
 import (
 	"fmt"
+	"strings"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
-	"strings"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 type common struct {
@@ -22,6 +24,9 @@ func newCommon(f *PKFileDescriptor, path, longName string) common {
 	fn := longName
 	if !strings.HasPrefix(fn, ".") {
 		fn = fmt.Sprintf("%s.%s", f.GetPackage(), longName)
+		if !strings.HasPrefix(fn, ".") {
+			fn = "." + fn
+		}
 	}
 
 	return common{
@@ -46,6 +51,9 @@ func (c *common) GetFullName() string { return c.FullName }
 
 // IsProto3 returns whether or not this is a proto3 object
 func (c *common) IsProto3() bool { return c.file.GetSyntax() == "proto3" }
+
+// GetOptionExtensions returns the options defined for this object
+func (c *common) GetOptionExtensions() map[string]interface{} { return c.OptionExtensions }
 
 func getOptions(options proto.Message) (m map[string]interface{}) {
 	protoregistry.GlobalTypes.RangeExtensions(func(extensionType protoreflect.ExtensionType) bool {
@@ -86,31 +94,36 @@ type PKImportedDescriptor struct {
 // A PKFileDescriptor describes a single proto file with all of its messages, enums, services, etc.
 type PKFileDescriptor struct {
 	comments Comments
-	*descriptorpb.FileDescriptorProto
+	desc     *descriptorpb.FileDescriptorProto
 
-	Comments        *Comment // Deprecated: see PackageComments
 	PackageComments *Comment
 	SyntaxComments  *Comment
 
-	Enums      []*PKEnumDescriptor
-	Extensions []*PKExtensionDescriptor
-	Imports    []*PKImportedDescriptor
-	Messages   []*PKDescriptor
-	Services   []*PKServiceDescriptor
+	Enums              []*PKEnumDescriptor
+	Extensions         []*PKExtensionDescriptor
+	Imports            []*PKImportedDescriptor
+	Messages           []*PKDescriptor
+	Services           []*PKServiceDescriptor
+	Dependencies       []*PKFileDescriptor
+	PublicDependencies []*PKFileDescriptor
 
 	OptionExtensions map[string]interface{}
 
-	FileDescriptor protoreflect.FileDescriptor
-	IsFileToGenerate    bool
+	FileDescriptor   protoreflect.FileDescriptor
+	IsFileToGenerate bool
 }
+
+func (f *PKFileDescriptor) ProtoDesc() *descriptorpb.FileDescriptorProto { return f.desc }
+
+func (f *PKFileDescriptor) GetName() string    { return f.ProtoDesc().GetName() }
+func (f *PKFileDescriptor) GetPackage() string { return f.ProtoDesc().GetPackage() }
+func (f *PKFileDescriptor) GetSyntax() string  { return f.ProtoDesc().GetSyntax() }
+
+func (f *PKFileDescriptor) GetDependencies() []*PKFileDescriptor       { return f.Dependencies }
+func (f *PKFileDescriptor) GetPublicDependencies() []*PKFileDescriptor { return f.PublicDependencies }
 
 // IsProto3 returns whether or not this file is a proto3 file
 func (f *PKFileDescriptor) IsProto3() bool { return f.GetSyntax() == "proto3" }
-
-// GetComments returns the file's package comments.
-//
-// Deprecated: please see GetPackageComments
-func (f *PKFileDescriptor) GetComments() *Comment { return f.Comments }
 
 // GetPackageComments returns the file's package comments
 func (f *PKFileDescriptor) GetPackageComments() *Comment { return f.PackageComments }
@@ -133,6 +146,15 @@ func (f *PKFileDescriptor) GetMessages() []*PKDescriptor { return f.Messages }
 // GetServices returns the services defined in this file
 func (f *PKFileDescriptor) GetServices() []*PKServiceDescriptor { return f.Services }
 
+// GetOptionExtensions returns the file-level options defined in this file
+func (f *PKFileDescriptor) GetOptionExtensions() map[string]interface{} { return f.OptionExtensions }
+
+// GetFileDescriptor returns the underlying `protoreflect.FileDescriptor`
+func (f *PKFileDescriptor) GetFileDescriptor() protoreflect.FileDescriptor { return f.FileDescriptor }
+
+// GetIsFileToGenerate returns whether or not this file is to be generated
+func (f *PKFileDescriptor) GetIsFileToGenerate() bool { return f.IsFileToGenerate }
+
 // GetEnum returns the enumeration with the specified name (returns `nil` if not found)
 func (f *PKFileDescriptor) GetEnum(name string) *PKEnumDescriptor {
 	for _, e := range f.GetEnums() {
@@ -147,7 +169,7 @@ func (f *PKFileDescriptor) GetEnum(name string) *PKEnumDescriptor {
 // GetMessage returns the message with the specified name (returns `nil` if not found)
 func (f *PKFileDescriptor) GetMessage(name string) *PKDescriptor {
 	for _, m := range f.GetMessages() {
-		if m.GetName() == name || m.GetLongName() == name {
+		if m.GetName() == name || m.GetLongName() == name || m.GetFullName() == name {
 			return m
 		}
 	}
@@ -181,11 +203,17 @@ func (f *PKFileDescriptor) setOptions(options proto.Message) {
 // An PKEnumDescriptor describe an enum type
 type PKEnumDescriptor struct {
 	common
-	*descriptorpb.EnumDescriptorProto
+	desc     *descriptorpb.EnumDescriptorProto
 	Parent   *PKDescriptor
 	Values   []*PKEnumValueDescriptor
 	Comments *Comment
 }
+
+// ProtoDesc returns the underlying `EnumDescriptorProto`
+func (e *PKEnumDescriptor) ProtoDesc() *descriptorpb.EnumDescriptorProto { return e.desc }
+
+// GetName returns the name of the enum
+func (e *PKEnumDescriptor) GetName() string { return e.ProtoDesc().GetName() }
 
 // GetComments returns a description of this enum
 func (e *PKEnumDescriptor) GetComments() *Comment { return e.Comments }
@@ -210,10 +238,16 @@ func (e *PKEnumDescriptor) GetNamedValue(name string) *PKEnumValueDescriptor {
 // An PKEnumValueDescriptor describes an enum value
 type PKEnumValueDescriptor struct {
 	common
-	*descriptorpb.EnumValueDescriptorProto
+	desc     *descriptorpb.EnumValueDescriptorProto
 	Enum     *PKEnumDescriptor
 	Comments *Comment
 }
+
+// ProtoDesc returns the underlying `EnumValueDescriptorProto`
+func (v *PKEnumValueDescriptor) ProtoDesc() *descriptorpb.EnumValueDescriptorProto { return v.desc }
+
+// GetName returns the name of the value
+func (v *PKEnumValueDescriptor) GetName() string { return v.ProtoDesc().GetName() }
 
 // GetComments returns a description of the value
 func (v *PKEnumValueDescriptor) GetComments() *Comment { return v.Comments }
@@ -224,11 +258,27 @@ func (v *PKEnumValueDescriptor) GetEnum() *PKEnumDescriptor { return v.Enum }
 // An PKExtensionDescriptor describes a protobuf extension. If it's a top-level extension it's parent will be `nil`
 type PKExtensionDescriptor struct {
 	common
-	*descriptorpb.FieldDescriptorProto
+	desc                *descriptorpb.FieldDescriptorProto
 	Parent              *PKDescriptor
 	Comments            *Comment
 	ExtensionDescriptor protoreflect.ExtensionDescriptor
 }
+
+// ProtoDesc returns the underlying `desc`
+func (e *PKExtensionDescriptor) ProtoDesc() *descriptorpb.FieldDescriptorProto { return e.desc }
+
+// GetExtensionDescriptor returns the underlying `protoreflect.ExtensionDescriptor`
+func (e *PKExtensionDescriptor) GetExtensionDescriptor() protoreflect.ExtensionDescriptor {
+	return e.ExtensionDescriptor
+}
+
+// ExtensionType returns a new `protoreflect.ExtensionType` for this extension
+func (e *PKExtensionDescriptor) ExtensionType() protoreflect.ExtensionType {
+	return dynamicpb.NewExtensionType(e.GetExtensionDescriptor())
+}
+
+// GetName returns the name of the extension
+func (e *PKExtensionDescriptor) GetName() string { return e.ProtoDesc().GetName() }
 
 // GetComments returns a description of the extension
 func (e *PKExtensionDescriptor) GetComments() *Comment { return e.Comments }
@@ -239,7 +289,7 @@ func (e *PKExtensionDescriptor) GetParent() *PKDescriptor { return e.Parent }
 // A PKDescriptor describes a message
 type PKDescriptor struct {
 	common
-	*descriptorpb.DescriptorProto
+	desc       *descriptorpb.DescriptorProto
 	Parent     *PKDescriptor
 	Comments   *Comment
 	Enums      []*PKEnumDescriptor
@@ -247,6 +297,10 @@ type PKDescriptor struct {
 	Fields     []*PKFieldDescriptor
 	Messages   []*PKDescriptor
 }
+
+func (m *PKDescriptor) ProtoDesc() *descriptorpb.DescriptorProto { return m.desc }
+
+func (m *PKDescriptor) GetName() string { return m.ProtoDesc().GetName() }
 
 // GetComments returns a description of the message
 func (m *PKDescriptor) GetComments() *Comment { return m.Comments }
@@ -306,10 +360,16 @@ func (m *PKDescriptor) GetMessageField(name string) *PKFieldDescriptor {
 // A PKFieldDescriptor describes a message field
 type PKFieldDescriptor struct {
 	common
-	*descriptorpb.FieldDescriptorProto
+	desc     *descriptorpb.FieldDescriptorProto
 	Comments *Comment
 	Message  *PKDescriptor
 }
+
+// ProtoDesc returns the underlying `desc`
+func (mf *PKFieldDescriptor) ProtoDesc() *descriptorpb.FieldDescriptorProto { return mf.desc }
+
+// GetName returns the name of the field
+func (mf *PKFieldDescriptor) GetName() string { return mf.ProtoDesc().GetName() }
 
 // GetComments returns a description of the field
 func (mf *PKFieldDescriptor) GetComments() *Comment { return mf.Comments }
@@ -320,11 +380,17 @@ func (mf *PKFieldDescriptor) GetMessage() *PKDescriptor { return mf.Message }
 // A PKServiceDescriptor describes a service
 type PKServiceDescriptor struct {
 	common
-	*descriptorpb.ServiceDescriptorProto
+	desc              *descriptorpb.ServiceDescriptorProto
 	Comments          *Comment
 	Methods           []*PKMethodDescriptor
 	ServiceDescriptor protoreflect.ServiceDescriptor
 }
+
+// ProtoDesc returns the underlying `desc`
+func (s *PKServiceDescriptor) ProtoDesc() *descriptorpb.ServiceDescriptorProto { return s.desc }
+
+// GetName returns the name of the service
+func (s *PKServiceDescriptor) GetName() string { return s.ProtoDesc().GetName() }
 
 // GetComments returns a description of the service
 func (s *PKServiceDescriptor) GetComments() *Comment { return s.Comments }
@@ -346,14 +412,33 @@ func (s *PKServiceDescriptor) GetNamedMethod(name string) *PKMethodDescriptor {
 // A PKMethodDescriptor describes a method in a service
 type PKMethodDescriptor struct {
 	common
-	*descriptorpb.MethodDescriptorProto
+	desc             *descriptorpb.MethodDescriptorProto
 	Comments         *Comment
 	Service          *PKServiceDescriptor
 	MethodDescriptor protoreflect.MethodDescriptor
+	InputType        *PKDescriptor
+	OutputType       *PKDescriptor
 }
+
+// ProtoDesc returns the underlying `desc`
+func (m *PKMethodDescriptor) ProtoDesc() *descriptorpb.MethodDescriptorProto { return m.desc }
+
+// GetName returns the name of the method
+func (m *PKMethodDescriptor) GetName() string { return m.ProtoDesc().GetName() }
+
+// GetInputType returns the input message type
+func (m *PKMethodDescriptor) GetInputType() *PKDescriptor { return m.InputType }
+
+// GetOutputType returns the output message type
+func (m *PKMethodDescriptor) GetOutputType() *PKDescriptor { return m.OutputType }
 
 // GetComments returns a description of the method
 func (m *PKMethodDescriptor) GetComments() *Comment { return m.Comments }
 
 // GetService returns the service descriptor that defines this method
 func (m *PKMethodDescriptor) GetService() *PKServiceDescriptor { return m.Service }
+
+// GetMethodDescriptor returns the underlying `protoreflect.MethodDescriptor`
+func (m *PKMethodDescriptor) GetMethodDescriptor() protoreflect.MethodDescriptor {
+	return m.MethodDescriptor
+}

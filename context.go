@@ -7,11 +7,23 @@ import (
 type contextKey string
 
 const (
+	allFilesContextKey   = contextKey("all_files")
 	fileContextKey       = contextKey("file")
 	descriptorContextKey = contextKey("descriptor")
 	enumContextKey       = contextKey("enum")
 	serviceContextKey    = contextKey("service")
 )
+
+// ContextWithAllFiles returns a new context with the attached `AllFiles`
+func ContextWithAllFiles(ctx context.Context, allFiles map[string]*PKFileDescriptor) context.Context {
+	return context.WithValue(ctx, allFilesContextKey, allFiles)
+}
+
+// AllFilesFromContext returns the `AllFiles` from the context and whether or not the key was found.
+func AllFilesFromContext(ctx context.Context) (map[string]*PKFileDescriptor, bool) {
+	val, ok := ctx.Value(allFilesContextKey).(map[string]*PKFileDescriptor)
+	return val, ok
+}
 
 // ContextWithFileDescriptor returns a new context with the attached `PKFileDescriptor`
 func ContextWithFileDescriptor(ctx context.Context, fd *PKFileDescriptor) context.Context {

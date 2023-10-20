@@ -3,6 +3,10 @@ package protokit
 import (
 	"context"
 	"fmt"
+	"log"
+	"sort"
+	"strings"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -10,12 +14,10 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/pluginpb"
-	"log"
-	"strings"
 )
 
 const (
-	// tag numbers in FileDescriptorProto
+	// tag numbers in desc
 	packageCommentPath   = 2
 	messageCommentPath   = 4
 	enumCommentPath      = 5
@@ -23,16 +25,16 @@ const (
 	extensionCommentPath = 7
 	syntaxCommentPath    = 12
 
-	// tag numbers in DescriptorProto
+	// tag numbers in desc
 	messageFieldCommentPath     = 2 // field
 	messageMessageCommentPath   = 3 // nested_type
 	messageEnumCommentPath      = 4 // enum_type
 	messageExtensionCommentPath = 6 // extension
 
-	// tag numbers in EnumDescriptorProto
+	// tag numbers in desc
 	enumValueCommentPath = 2 // value
 
-	// tag numbers in ServiceDescriptorProto
+	// tag numbers in desc
 	serviceMethodCommentPath = 2
 )
 
@@ -58,9 +60,9 @@ func getAllFileDescriptor(req *pluginpb.CodeGeneratorRequest) map[string]protore
 
 func registerAllExtensions(allFileDesc map[string]protoreflect.FileDescriptor) {
 	for _, fileDesc := range allFileDesc {
-		exts := fileDesc.Extensions()
-		for i := 0; i < exts.Len(); i++ {
-			ext := exts.Get(i)
+		extensions := fileDesc.Extensions()
+		for i := 0; i < extensions.Len(); i++ {
+			ext := extensions.Get(i)
 			err := protoregistry.GlobalTypes.RegisterExtension(dynamicpb.NewExtensionType(ext))
 			if err != nil {
 				log.Fatal(err)
@@ -82,8 +84,8 @@ func reUnmarshalReq(req *pluginpb.CodeGeneratorRequest) (err error) {
 }
 
 func ParseCodeGenRequestAllFiles(req *pluginpb.CodeGeneratorRequest) ([]*PKFileDescriptor, error) {
-	allFiles := make(map[string]*PKFileDescriptor)
-	genFiles := make([]*PKFileDescriptor, 0, len(req.GetProtoFile()))
+	allFilesMap := make(map[string]*PKFileDescriptor)
+	allFiles := make([]*PKFileDescriptor, 0, len(req.GetProtoFile()))
 
 	allFileDesc := getAllFileDescriptor(req)
 	registerAllExtensions(allFileDesc)
@@ -91,34 +93,41 @@ func ParseCodeGenRequestAllFiles(req *pluginpb.CodeGeneratorRequest) ([]*PKFileD
 	if err != nil {
 		return nil, err
 	}
+	ctx := ContextWithAllFiles(context.Background(), allFilesMap)
 
 	for _, pf := range req.GetProtoFile() {
-		allFiles[pf.GetName()] = parseFile(context.Background(), pf, allFileDesc[pf.GetName()])
+		allFilesMap[pf.GetName()] = parseFile(ctx, pf, allFileDesc[pf.GetName()])
 	}
 
-	for _, f := range allFiles {
-
-		parseAllImports(f, allFiles)
-
-		genFiles = append(genFiles, f)
+	for _, f := range allFilesMap {
+		parseAllImports(f, allFilesMap)
+		allFiles = append(allFiles, f)
 	}
+
 	for _, f := range req.FileToGenerate {
-		allFiles[f].IsFileToGenerate = true
+		// mark files to generate
+		allFilesMap[f].IsFileToGenerate = true
 	}
 
-	return genFiles, nil
+	sort.Slice(allFiles, func(i, j int) bool {
+		return allFiles[i].GetName() < allFiles[j].GetName()
+	})
+
+	return allFiles, nil
 }
 
-func parseFile(ctx context.Context, fd *descriptorpb.FileDescriptorProto, f protoreflect.FileDescriptor) *PKFileDescriptor {
+func parseFile(ctx context.Context, fd *descriptorpb.FileDescriptorProto,
+	f protoreflect.FileDescriptor) *PKFileDescriptor {
 	comments := ParseComments(fd)
 
+	allFilesMap, _ := AllFilesFromContext(ctx)
+
 	file := &PKFileDescriptor{
-		comments:            comments,
-		FileDescriptorProto: fd,
-		Comments:            comments.Get(fmt.Sprintf("%d", packageCommentPath)),
-		PackageComments:     comments.Get(fmt.Sprintf("%d", packageCommentPath)),
-		SyntaxComments:      comments.Get(fmt.Sprintf("%d", syntaxCommentPath)),
-		FileDescriptor:      f,
+		comments:        comments,
+		desc:            fd,
+		PackageComments: comments.Get(fmt.Sprintf("%d", packageCommentPath)),
+		SyntaxComments:  comments.Get(fmt.Sprintf("%d", syntaxCommentPath)),
+		FileDescriptor:  f,
 	}
 
 	if fd.Options != nil {
@@ -130,6 +139,12 @@ func parseFile(ctx context.Context, fd *descriptorpb.FileDescriptorProto, f prot
 	file.Extensions = parseExtensions(fileCtx, fd.GetExtension())
 	file.Messages = parseMessages(fileCtx, fd.GetMessageType())
 	file.Services = parseServices(fileCtx, fd.GetService())
+	for _, dep := range fd.GetDependency() {
+		file.Dependencies = append(file.Dependencies, allFilesMap[dep])
+	}
+	for _, dep := range fd.GetPublicDependency() {
+		file.PublicDependencies = append(file.PublicDependencies, allFilesMap[fd.GetDependency()[dep]])
+	}
 
 	return file
 }
@@ -149,10 +164,10 @@ func parseEnums(ctx context.Context, protos []*descriptorpb.EnumDescriptorProto)
 		}
 
 		enums[i] = &PKEnumDescriptor{
-			common:              newCommon(file, commentPath, longName),
-			EnumDescriptorProto: ed,
-			Comments:            file.comments.Get(commentPath),
-			Parent:              parent,
+			common:   newCommon(file, commentPath, longName),
+			desc:     ed,
+			Comments: file.comments.Get(commentPath),
+			Parent:   parent,
 		}
 		if ed.Options != nil {
 			enums[i].setOptions(ed.Options)
@@ -174,10 +189,10 @@ func parseEnumValues(ctx context.Context, protos []*descriptorpb.EnumValueDescri
 		longName := fmt.Sprintf("%s.%s", enum.GetLongName(), vd.GetName())
 
 		values[i] = &PKEnumValueDescriptor{
-			common:                   newCommon(file, "", longName),
-			EnumValueDescriptorProto: vd,
-			Enum:                     enum,
-			Comments:                 file.comments.Get(fmt.Sprintf("%s.%d.%d", enum.path, enumValueCommentPath, i)),
+			common:   newCommon(file, "", longName),
+			desc:     vd,
+			Enum:     enum,
+			Comments: file.comments.Get(fmt.Sprintf("%s.%d.%d", enum.path, enumValueCommentPath, i)),
 		}
 		if vd.Options != nil {
 			values[i].setOptions(vd.Options)
@@ -206,11 +221,11 @@ func parseExtensions(ctx context.Context, protos []*descriptorpb.FieldDescriptor
 		}
 
 		exts[i] = &PKExtensionDescriptor{
-			common:               newCommon(file, commentPath, longName),
-			FieldDescriptorProto: ext,
-			Comments:             file.comments.Get(commentPath),
-			Parent:               parent,
-			ExtensionDescriptor:  file.FileDescriptor.Extensions().ByName(protoreflect.Name(ext.GetName())),
+			common:              newCommon(file, commentPath, longName),
+			desc:                ext,
+			Comments:            file.comments.Get(commentPath),
+			Parent:              parent,
+			ExtensionDescriptor: file.FileDescriptor.Extensions().ByName(protoreflect.Name(ext.GetName())),
 		}
 		if ext.Options != nil {
 			exts[i].setOptions(ext.Options)
@@ -223,12 +238,12 @@ func parseExtensions(ctx context.Context, protos []*descriptorpb.FieldDescriptor
 func parseAllImports(fd *PKFileDescriptor, allFiles map[string]*PKFileDescriptor) {
 	fd.Imports = make([]*PKImportedDescriptor, 0)
 
-	for _, fileName := range fd.GetDependency() {
+	for _, fileName := range fd.ProtoDesc().GetDependency() {
 		file := allFiles[fileName]
 
 		for _, d := range file.GetMessages() {
 			// skip map entry objects
-			if !d.GetOptions().GetMapEntry() {
+			if !d.ProtoDesc().GetOptions().GetMapEntry() {
 				fd.Imports = append(fd.Imports, &PKImportedDescriptor{d.common})
 			}
 		}
@@ -258,10 +273,10 @@ func parseMessages(ctx context.Context, protos []*descriptorpb.DescriptorProto) 
 		}
 
 		msgs[i] = &PKDescriptor{
-			common:          newCommon(file, commentPath, longName),
-			DescriptorProto: md,
-			Comments:        file.comments.Get(commentPath),
-			Parent:          parent,
+			common:   newCommon(file, commentPath, longName),
+			desc:     md,
+			Comments: file.comments.Get(commentPath),
+			Parent:   parent,
 		}
 		if md.Options != nil {
 			msgs[i].setOptions(md.Options)
@@ -286,10 +301,10 @@ func parseMessageFields(ctx context.Context, protos []*descriptorpb.FieldDescrip
 		longName := fmt.Sprintf("%s.%s", message.GetLongName(), fd.GetName())
 
 		fields[i] = &PKFieldDescriptor{
-			common:               newCommon(file, "", longName),
-			FieldDescriptorProto: fd,
-			Comments:             file.comments.Get(fmt.Sprintf("%s.%d.%d", message.path, messageFieldCommentPath, i)),
-			Message:              message,
+			common:   newCommon(file, "", longName),
+			desc:     fd,
+			Comments: file.comments.Get(fmt.Sprintf("%s.%d.%d", message.path, messageFieldCommentPath, i)),
+			Message:  message,
 		}
 		if fd.Options != nil {
 			fields[i].setOptions(fd.Options)
@@ -308,10 +323,10 @@ func parseServices(ctx context.Context, protos []*descriptorpb.ServiceDescriptor
 		commentPath := fmt.Sprintf("%d.%d", serviceCommentPath, i)
 
 		svcs[i] = &PKServiceDescriptor{
-			common:                 newCommon(file, commentPath, longName),
-			ServiceDescriptorProto: sd,
-			Comments:               file.comments.Get(commentPath),
-			ServiceDescriptor:      file.FileDescriptor.Services().ByName(protoreflect.Name(sd.GetName())),
+			common:            newCommon(file, commentPath, longName),
+			desc:              sd,
+			Comments:          file.comments.Get(commentPath),
+			ServiceDescriptor: file.FileDescriptor.Services().ByName(protoreflect.Name(sd.GetName())),
 		}
 		if sd.Options != nil {
 			svcs[i].setOptions(sd.Options)
@@ -334,11 +349,13 @@ func parseServiceMethods(ctx context.Context, protos []*descriptorpb.MethodDescr
 		longName := fmt.Sprintf("%s.%s", svc.GetLongName(), md.GetName())
 
 		methods[i] = &PKMethodDescriptor{
-			common:                newCommon(file, "", longName),
-			MethodDescriptorProto: md,
-			Service:               svc,
-			Comments:              file.comments.Get(fmt.Sprintf("%s.%d.%d", svc.path, serviceMethodCommentPath, i)),
-			MethodDescriptor:      svc.ServiceDescriptor.Methods().ByName(protoreflect.Name(md.GetName())),
+			common:           newCommon(file, "", longName),
+			desc:             md,
+			Comments:         file.comments.Get(fmt.Sprintf("%s.%d.%d", svc.path, serviceMethodCommentPath, i)),
+			Service:          svc,
+			MethodDescriptor: svc.ServiceDescriptor.Methods().ByName(protoreflect.Name(md.GetName())),
+			InputType:        file.GetMessage(md.GetInputType()),
+			OutputType:       file.GetMessage(md.GetOutputType()),
 		}
 		if md.Options != nil {
 			methods[i].setOptions(md.Options)
